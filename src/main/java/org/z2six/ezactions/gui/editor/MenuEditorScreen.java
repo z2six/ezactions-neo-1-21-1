@@ -33,7 +33,7 @@ import java.util.Objects;
  * - When inside a category, a white breadcrumb row appears above red "Back to root" and (optional) red "Back to XYZ" rows.
  * - Drag & drop to reorder, with a blue insertion indicator line.
  * - Drop over a category: highlight it and drop INTO that category.
- * - Drop over "Back to root"/"Back to XYZ": highlight, and drop OUT to that level WITHOUT changing the user's current view.
+ * - Drop over "Back to root"/"Back to XYZ": move OUT to that level WITHOUT changing the user's current view.
  * - Scrollbar & mouse wheel supported.
  * - Defensive logging; fail-soft behavior.
  */
@@ -67,9 +67,11 @@ public final class MenuEditorScreen extends Screen {
     private Button btnAddCat;
     private Button btnEdit;
     private Button btnRemove;
-    private Button btnClose;
-    private Button btnExport;
+
     private Button btnImport;
+    private Button btnExport;
+    private Button btnClose;
+    private Button btnConfig; // NEW
 
     // List geometry
     private int listLeft, listTop, listWidth, listHeight;
@@ -258,15 +260,18 @@ public final class MenuEditorScreen extends Screen {
         int right = this.width - PAD;
         int bottom = this.height - PAD;
 
+        // Left column
         int x = left;
         int y = top;
 
+        // Filter
         filterBox = new EditBox(this.font, x, y, LEFT_W, 20, Component.literal("Filter"));
         filterBox.setHint(Component.literal("Filter…"));
         filterBox.setResponder(s -> rebuildRows());
         addRenderableWidget(filterBox);
         y += 24;
 
+        // Add Key
         btnAddKey = Button.builder(Component.literal("Add Key Action"), b -> {
             var parent = this;
             this.minecraft.setScreen(new KeyActionEditScreen(
@@ -275,19 +280,19 @@ public final class MenuEditorScreen extends Screen {
                         List<MenuItem> target = current();
                         if (editingOrNull == null) target.add(newItem);
                         else {
-                            for (int i = 0; i < target.size(); i++) {
-                                if (Objects.equals(target.get(i).id(), editingOrNull.id())) {
-                                    target.set(i, newItem); break;
+                            for (int i1 = 0; i1 < target.size(); i1++) {
+                                if (Objects.equals(target.get(i1).id(), editingOrNull.id())) {
+                                    target.set(i1, newItem); break;
                                 }
                             }
                         }
                         RadialMenu.persist();
                         rebuildRows();
                         int idx2 = -1;
-                        for (int i = 0; i < rows.size(); i++) {
-                            Rows r = rows.get(i);
+                        for (int i2 = 0; i2 < rows.size(); i2++) {
+                            Rows r = rows.get(i2);
                             if (r instanceof Rows.ItemRow ir && Objects.equals(ir.item().id(), newItem.id())) {
-                                idx2 = i; break;
+                                idx2 = i2; break;
                             }
                         }
                         if (idx2 >= 0) {
@@ -300,18 +305,21 @@ public final class MenuEditorScreen extends Screen {
         addRenderableWidget(btnAddKey);
         y += 24;
 
+        // Add Command
         btnAddCmd = Button.builder(Component.literal("Add Command"), b -> {
             this.minecraft.setScreen(new CommandActionEditScreen(this, null));
         }).bounds(x, y, LEFT_W, 20).build();
         addRenderableWidget(btnAddCmd);
         y += 24;
 
+        // Add Category
         btnAddCat = Button.builder(Component.literal("Add Bundle"), b -> {
             this.minecraft.setScreen(new CategoryEditScreen(this, null));
         }).bounds(x, y, LEFT_W, 20).build();
         addRenderableWidget(btnAddCat);
         y += 24;
 
+        // Edit / Remove
         btnEdit = Button.builder(Component.literal("Edit Selected"), b -> onEditSelected())
                 .bounds(x, y, LEFT_W, 20).build();
         addRenderableWidget(btnEdit);
@@ -322,14 +330,36 @@ public final class MenuEditorScreen extends Screen {
         addRenderableWidget(btnRemove);
         y += 24;
 
+        // --- Bottom-anchored controls (two rows, two columns) ----------------
         final int BTN_H = 20;
-        final int VSTEP = 24;
+        final int VSTEP = 24;         // vertical spacing between rows
+        final int H_GAP = PAD;        // horizontal gap between the two buttons in a row
+        final int HALF_W = (LEFT_W - H_GAP) / 2;
+
+        // Labels with simple Unicode arrows; tinted so they stand out
         Component importLabel = Component.literal("⇩ Import").withStyle(ChatFormatting.AQUA);
         Component exportLabel = Component.literal("⇧ Export").withStyle(ChatFormatting.AQUA);
 
-        int yClose = bottom - 22;
-        int yExport = yClose - VSTEP;
-        int yImport = yExport - VSTEP;
+        // Bottom row (nearest to bottom): Close | Config
+        int yRowBottom = bottom - 22;
+        int xLeftCol   = x;
+        int xRightCol  = x + HALF_W + H_GAP;
+
+        btnClose = Button.builder(Component.literal("Close"), b -> onClose())
+                .bounds(xLeftCol, yRowBottom, HALF_W, BTN_H).build();
+        addRenderableWidget(btnClose);
+
+        btnConfig = Button.builder(Component.literal("Config"), b -> {
+            try {
+                Constants.LOG.info("[{}] Config button clicked (placeholder)", Constants.MOD_NAME);
+            } catch (Throwable t) {
+                Constants.LOG.warn("[{}] Config button handler failed: {}", Constants.MOD_NAME, t.toString());
+            }
+        }).bounds(xRightCol, yRowBottom, HALF_W, BTN_H).build();
+        addRenderableWidget(btnConfig);
+
+        // Row above bottom: Import | Export
+        int yRowTop = yRowBottom - VSTEP;
 
         btnImport = Button.builder(importLabel, b -> {
             try {
@@ -342,22 +372,20 @@ public final class MenuEditorScreen extends Screen {
             } catch (Throwable t) {
                 Constants.LOG.warn("[{}] Import button action failed: {}", Constants.MOD_NAME, t.toString());
             }
-        }).bounds(x, yImport, LEFT_W, BTN_H).build();
+        }).bounds(xLeftCol, yRowTop, HALF_W, BTN_H).build();
         addRenderableWidget(btnImport);
 
         btnExport = Button.builder(exportLabel, b -> {
-            try { MenuImportExport.exportToClipboard(); }
-            catch (Throwable t) {
+            try {
+                MenuImportExport.exportToClipboard();
+            } catch (Throwable t) {
                 Constants.LOG.warn("[{}] Export button action failed: {}", Constants.MOD_NAME, t.toString());
             }
-        }).bounds(x, yExport, LEFT_W, BTN_H).build();
+        }).bounds(xRightCol, yRowTop, HALF_W, BTN_H).build();
         addRenderableWidget(btnExport);
+        // ---------------------------------------------------------------------
 
-        btnClose = Button.builder(Component.literal("Close"), b -> onClose())
-                .bounds(x, yClose, LEFT_W, BTN_H).build();
-        addRenderableWidget(btnClose);
-
-        // List panel
+        // --- List area on the right ---
         listLeft = left + LEFT_W + PAD;
         listTop = top;
         listWidth = right - listLeft;
@@ -759,9 +787,6 @@ public final class MenuEditorScreen extends Screen {
             dragging = false;
             dragRowIdx = -1;
 
-            // Capture current path BEFORE any temporary navigation
-            List<String> restorePath = MenuNavUtil.capturePathTitles();
-
             // Special targets: move OUT to parent/root WITHOUT changing the final view
             if (dropSpecial != DropSpecial.NONE) {
                 try {
@@ -774,13 +799,13 @@ public final class MenuEditorScreen extends Screen {
                                 boolean appended = false;
 
                                 if (dropSpecial == DropSpecial.BACK_PARENT) {
-                                    List<MenuItem> parent = org.z2six.ezactions.data.menu.RadialMenu.parentItems();
+                                    List<MenuItem> parent = RadialMenu.parentItems();
                                     if (parent != null) {
                                         parent.add(moved);
                                         appended = true;
                                     }
                                 } else if (dropSpecial == DropSpecial.BACK_ROOT) {
-                                    List<MenuItem> root = org.z2six.ezactions.data.menu.RadialMenu.rootMutable();
+                                    List<MenuItem> root = RadialMenu.rootMutable();
                                     if (root != null) {
                                         root.add(moved);
                                         appended = true;
@@ -788,7 +813,7 @@ public final class MenuEditorScreen extends Screen {
                                 }
 
                                 if (appended) {
-                                    org.z2six.ezactions.data.menu.RadialMenu.persist();
+                                    RadialMenu.persist();
                                 } else {
                                     // rollback if we couldn't append
                                     int safeIdx = Math.min(fromContent, cur.size());
@@ -798,11 +823,9 @@ public final class MenuEditorScreen extends Screen {
                         }
                     }
                 } catch (Throwable t) {
-                    org.z2six.ezactions.Constants.LOG.warn("[{}] Drop-back exception: {}",
-                            org.z2six.ezactions.Constants.MOD_NAME, t.toString());
+                    Constants.LOG.warn("[{}] Drop-back exception: {}", Constants.MOD_NAME, t.toString());
                 }
 
-                // Rebuild the current view; we did NOT change PATH, so the user stays in place.
                 rebuildRows();
                 selectedRow = -1;
                 ensureSelectedVisible();
@@ -893,13 +916,6 @@ public final class MenuEditorScreen extends Screen {
         return super.mouseReleased(mouseX, mouseY, button);
     }
 
-    /** Called by child edit screens after they save, so our list reflects changes immediately. */
-    public void refreshFromChild() {
-        try {
-            this.rebuildRows();
-        } catch (Throwable ignored) {}
-    }
-
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double deltaX, double deltaY) {
         ScrollbarMath.Metrics sb = ScrollbarMath.compute(
@@ -922,6 +938,13 @@ public final class MenuEditorScreen extends Screen {
     private boolean hitList(double mx, double my) {
         return mx >= listLeft && mx < listLeft + listWidth
                 && my >= listTop && my < listTop + listHeight;
+    }
+
+    /** Called by child edit screens after they save, so our list reflects changes immediately. */
+    public void refreshFromChild() {
+        try {
+            this.rebuildRows();
+        } catch (Throwable ignored) {}
     }
 
     @Override
