@@ -18,10 +18,20 @@ import org.z2six.ezactions.helper.InputInjector;
 import java.util.function.BiConsumer;
 
 /**
- * Editor for ClickActionKey items + icon chooser + keybind picker.
- * - Preserves typed values while choosing icons/keybinds (kept in draft fields).
- * - Uses crisp background (no vanilla blur).
- * - Debug logs for layout diagnostics; errors never crash the client.
+ * // MainFile: src/main/java/org/z2six/ezactions/gui/editor/KeyActionEditScreen.java
+ *
+ * Spacing rule per field row:
+ *   Label
+ *   10 px
+ *   Field
+ *   5 px
+ *   (next Label)
+ *
+ * Buttons:
+ *   - First button row starts 10 px after the element above it.
+ *   - Each successive button row has 5 px vertical gap from the previous button row.
+ *
+ * Labels are drawn in render(); init() places widgets only.
  */
 public final class KeyActionEditScreen extends Screen {
 
@@ -29,33 +39,26 @@ public final class KeyActionEditScreen extends Screen {
     @FunctionalInterface
     public interface SaveHandler extends BiConsumer<MenuItem, MenuItem> { }
 
-    // Layout constants
+    // Field sizes
     private static final int FIELD_W = 240;
     private static final int FIELD_H = 20;
 
-    // Spacing controls
-    private static final int SPACE_LABEL_TO_FIELD = 12; // label sits this many px above its field
-    private static final int SPACE_FIELD_TO_FIELD = 28; // gap between two consecutive fields
+    // Spacing rules (fields)
+    private static final int LABEL_TO_FIELD = 10;         // label -> field
+    private static final int FIELD_TO_NEXT_LABEL = 5;     // field -> next label
 
-    // If you want "Mapping Name:" (and everything after it) lower by N px, change this:
-    private static final int EXTRA_AFTER_TITLE = 5;     // <<< Set to 0, 5, 10, ... as you like
-
-    // Historically this was a bit larger than FIELD_TO_FIELD; we’ll keep it equal for consistency.
-    // If you want a bigger visual break before the final row, bump this to e.g. 32 again.
-    private static final int SPACE_FIELD_TO_BUTTON = SPACE_FIELD_TO_FIELD;
-
-    // Single-row action buttons
-    private static final int BUTTON_W = 80;
-    private static final int BUTTON_H = FIELD_H;
-    private static final int BUTTON_GAP = 8;
+    // Spacing rules (buttons)
+    private static final int FIRST_BUTTON_ROW_OFFSET = 10; // after last field to first button row
+    private static final int BETWEEN_BUTTON_ROWS = 5;      // between successive button rows
 
     // Construction
     private final Screen parent;
     private final MenuItem editing;        // null => creating new
-    private final SaveHandler onSave;      // if null we fall back to RadialMenu add/replace
+    private final SaveHandler onSave;      // optional override
 
     // Draft state (survives child pickers)
     private String draftTitle = "";
+    private String draftNote = "";
     private String draftMapping = "";
     private boolean draftToggle = false;
     private InputInjector.DeliveryMode draftMode = InputInjector.DeliveryMode.AUTO;
@@ -63,15 +66,12 @@ public final class KeyActionEditScreen extends Screen {
 
     // Widgets
     private EditBox titleBox;
+    private EditBox noteBox;
     private EditBox mappingBox;
     private CycleButton<InputInjector.DeliveryMode> modeCycle;
     private CycleButton<Boolean> toggleCycle;
 
-    // --- Constructors --------------------------------------------------------
-
-    public KeyActionEditScreen(Screen parent, MenuItem editing) {
-        this(parent, editing, null);
-    }
+    public KeyActionEditScreen(Screen parent, MenuItem editing) { this(parent, editing, null); }
 
     public KeyActionEditScreen(Screen parent, MenuItem editing, SaveHandler onSave) {
         super(Component.literal(editing == null ? "Add Key Action" : "Edit Key Action"));
@@ -79,9 +79,9 @@ public final class KeyActionEditScreen extends Screen {
         this.editing = editing;
         this.onSave = onSave;
 
-        // Seed drafts from existing item, if any
         if (editing != null && editing.action() instanceof ClickActionKey ck) {
             this.draftTitle   = safe(editing.title());
+            try { this.draftNote = safe(editing.note()); } catch (Throwable ignored) {}
             this.draftMapping = safe(ck.mappingName());
             this.draftToggle  = ck.toggle();
             this.draftMode    = ck.mode();
@@ -92,12 +92,12 @@ public final class KeyActionEditScreen extends Screen {
 
     private static String safe(String s) { return s == null ? "" : s; }
 
-    // --- Screen lifecycle ----------------------------------------------------
-
     @Override
     protected void init() {
         int cx = this.width / 2;
-        int y = 52; // start a bit lower to leave room for the screen title
+
+        // Place fields; labels are drawn in render() at (fieldY - LABEL_TO_FIELD)
+        int y = 52;
 
         // Title field
         titleBox = new EditBox(this.font, cx - (FIELD_W / 2), y, FIELD_W, FIELD_H, Component.literal("Title"));
@@ -105,9 +105,15 @@ public final class KeyActionEditScreen extends Screen {
         titleBox.setHint(Component.literal("Title (e.g., Inventory)"));
         titleBox.setResponder(s -> draftTitle = safe(s));
         addRenderableWidget(titleBox);
+        y += FIELD_H + FIELD_TO_NEXT_LABEL + LABEL_TO_FIELD;
 
-        // Advance to next field with normal spacing, then add EXTRA_AFTER_TITLE bump.
-        y += SPACE_FIELD_TO_FIELD + EXTRA_AFTER_TITLE;
+        // Note field
+        noteBox = new EditBox(this.font, cx - (FIELD_W / 2), y, FIELD_W, FIELD_H, Component.literal("Note"));
+        noteBox.setValue(draftNote);
+        noteBox.setHint(Component.literal("Optional note (tooltip in editor)"));
+        noteBox.setResponder(s -> draftNote = safe(s));
+        addRenderableWidget(noteBox);
+        y += FIELD_H + FIELD_TO_NEXT_LABEL + LABEL_TO_FIELD;
 
         // Mapping field
         mappingBox = new EditBox(this.font, cx - (FIELD_W / 2), y, FIELD_W, FIELD_H, Component.literal("Mapping Name"));
@@ -115,9 +121,13 @@ public final class KeyActionEditScreen extends Screen {
         mappingBox.setHint(Component.literal("KeyMapping id (e.g., key.inventory)"));
         mappingBox.setResponder(s -> draftMapping = safe(s));
         addRenderableWidget(mappingBox);
-        y += SPACE_FIELD_TO_FIELD;
+        y += FIELD_H;
 
-        // Keybind picker
+        // --- Button rows stack ---
+        // 1) First button row starts 10px after last field
+        y += FIRST_BUTTON_ROW_OFFSET;
+
+        // Row 1: keybind picker button
         addRenderableWidget(Button.builder(Component.literal("Pick from Keybinds…"), b -> {
             try {
                 this.minecraft.setScreen(new KeybindPickerScreen(this, mapping -> {
@@ -131,9 +141,9 @@ public final class KeyActionEditScreen extends Screen {
                 Constants.LOG.warn("[{}] KeyActionEdit: opening KeybindPickerScreen failed: {}", Constants.MOD_NAME, t.toString());
             }
         }).bounds(cx - (FIELD_W / 2), y, FIELD_W, FIELD_H).build());
-        y += SPACE_FIELD_TO_FIELD;
+        y += FIELD_H + BETWEEN_BUTTON_ROWS;
 
-        // Icon picker
+        // Row 2: icon picker button
         addRenderableWidget(Button.builder(Component.literal("Choose Icon"), b -> {
             try {
                 this.minecraft.setScreen(new IconPickerScreen(this, ic -> {
@@ -144,9 +154,9 @@ public final class KeyActionEditScreen extends Screen {
                 Constants.LOG.warn("[{}] KeyActionEdit: opening IconPickerScreen failed: {}", Constants.MOD_NAME, t.toString());
             }
         }).bounds(cx - (FIELD_W / 2), y, FIELD_W, FIELD_H).build());
-        y += SPACE_FIELD_TO_FIELD;
+        y += FIELD_H + BETWEEN_BUTTON_ROWS;
 
-        // Delivery + Toggle
+        // Row 3: delivery + toggle on one row (same row height as field)
         modeCycle = addRenderableWidget(
                 CycleButton.builder((InputInjector.DeliveryMode dm) -> Component.literal(dm.name()))
                         .withValues(InputInjector.DeliveryMode.AUTO, InputInjector.DeliveryMode.INPUT, InputInjector.DeliveryMode.TICK)
@@ -157,43 +167,24 @@ public final class KeyActionEditScreen extends Screen {
                 CycleButton.onOffBuilder(draftToggle)
                         .create(cx + 4, y, (FIELD_W / 2) - 4, FIELD_H, Component.literal("Toggle"))
         );
+        y += FIELD_H + BETWEEN_BUTTON_ROWS;
 
-        // --- Action buttons on ONE ROW (aligned and with the SAME spacing as above) ---
-        int buttonY = y + SPACE_FIELD_TO_BUTTON; // uses same spacing value as other rows
-
-        int totalW = (BUTTON_W * 3) + (BUTTON_GAP * 2);
+        // Row 4: Save / Cancel / Back
+        int totalW = (80 * 3) + (8 * 2);
         int leftX = cx - (totalW / 2);
-        int xSave = leftX;
-        int xCancel = leftX + BUTTON_W + BUTTON_GAP;
-        int xBack = leftX + 2 * (BUTTON_W + BUTTON_GAP);
-
-        Constants.LOG.debug("[{}] KeyActionEdit: layout -> EXTRA_AFTER_TITLE={}, buttonY={}, positions=[save:{}, cancel:{}, back:{}]",
-                Constants.MOD_NAME, EXTRA_AFTER_TITLE, buttonY, xSave, xCancel, xBack);
-
         addRenderableWidget(Button.builder(Component.literal("Save"), b -> onSavePressed())
-                .bounds(xSave, buttonY, BUTTON_W, BUTTON_H).build());
-
-        addRenderableWidget(Button.builder(Component.literal("Cancel"), b -> {
-            try {
-                onClose();
-            } catch (Throwable t) {
-                Constants.LOG.warn("[{}] KeyActionEdit: Cancel failed: {}", Constants.MOD_NAME, t.toString());
-            }
-        }).bounds(xCancel, buttonY, BUTTON_W, BUTTON_H).build());
-
-        addRenderableWidget(Button.builder(Component.literal("Back"), b -> {
-            try {
-                this.minecraft.setScreen(parent);
-            } catch (Throwable t) {
-                Constants.LOG.warn("[{}] KeyActionEdit: Back navigation failed: {}", Constants.MOD_NAME, t.toString());
-            }
-        }).bounds(xBack, buttonY, BUTTON_W, BUTTON_H).build());
-        // ------------------------------------------------------------------------------
+                .bounds(leftX, y, 80, FIELD_H).build());
+        addRenderableWidget(Button.builder(Component.literal("Cancel"), b -> onClose())
+                .bounds(leftX + 80 + 8, y, 80, FIELD_H).build());
+        addRenderableWidget(Button.builder(Component.literal("Back"), b -> this.minecraft.setScreen(parent))
+                .bounds(leftX + 2 * (80 + 8), y, 80, FIELD_H).build());
+        // --- end button stack ---
     }
 
     private void onSavePressed() {
         try {
-            draftTitle = safe(titleBox == null ? draftTitle : titleBox.getValue()).trim();
+            draftTitle   = safe(titleBox == null ? draftTitle : titleBox.getValue()).trim();
+            draftNote    = safe(noteBox  == null ? draftNote  : noteBox.getValue()).trim();
             draftMapping = safe(mappingBox == null ? draftMapping : mappingBox.getValue()).trim();
             draftMode = modeCycle == null ? draftMode : modeCycle.getValue();
             draftToggle = toggleCycle != null && Boolean.TRUE.equals(toggleCycle.getValue());
@@ -203,9 +194,11 @@ public final class KeyActionEditScreen extends Screen {
                 return;
             }
 
+            // Assumes MenuItem supports a 'note' field
             MenuItem newItem = new MenuItem(
                     editing != null ? editing.id() : MenuEditorScreen.freshId("key"),
                     draftTitle,
+                    draftNote,
                     draftIcon,
                     new ClickActionKey(draftMapping, draftToggle, draftMode),
                     java.util.List.of()
@@ -217,9 +210,10 @@ public final class KeyActionEditScreen extends Screen {
                 return;
             }
 
-            boolean ok;
-            if (editing == null) ok = RadialMenu.addToCurrent(newItem);
-            else                 ok = RadialMenu.replaceInCurrent(editing.id(), newItem);
+            boolean ok = (editing == null)
+                    ? RadialMenu.addToCurrent(newItem)
+                    : RadialMenu.replaceInCurrent(editing.id(), newItem);
+
             if (!ok) {
                 Constants.LOG.info("[{}] Page full or replace failed for '{}'.", Constants.MOD_NAME, newItem.title());
             }
@@ -229,25 +223,26 @@ public final class KeyActionEditScreen extends Screen {
         }
     }
 
-    // --- Render --------------------------------------------------------------
-
     @Override
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-        // Custom, crisp background (no vanilla blur)
+        // Background
         g.fill(0, 0, this.width, this.height, 0x88000000);
         g.fill(12, 52, this.width - 12, this.height - 36, 0xC0101010);
 
         g.drawCenteredString(this.font, this.title.getString(), this.width / 2, 20, 0xFFFFFF);
 
-        // Labels above fields
+        // Labels: draw at (fieldY - LABEL_TO_FIELD)
         if (titleBox != null) {
-            g.drawString(this.font, "Title:", titleBox.getX(), titleBox.getY() - SPACE_LABEL_TO_FIELD, 0xA0A0A0);
+            g.drawString(this.font, "Title:", titleBox.getX(), titleBox.getY() - LABEL_TO_FIELD, 0xA0A0A0);
+        }
+        if (noteBox != null) {
+            g.drawString(this.font, "Note:", noteBox.getX(), noteBox.getY() - LABEL_TO_FIELD, 0xA0A0A0);
         }
         if (mappingBox != null) {
-            g.drawString(this.font, "Mapping Name:", mappingBox.getX(), mappingBox.getY() - SPACE_LABEL_TO_FIELD, 0xA0A0A0);
+            g.drawString(this.font, "Mapping Name:", mappingBox.getX(), mappingBox.getY() - LABEL_TO_FIELD, 0xA0A0A0);
         }
 
-        // Small live preview of the chosen icon (right side)
+        // Icon preview (top-right)
         try {
             IconRenderer.drawIcon(g, this.width - 28, 28, this.draftIcon);
         } catch (Throwable ignored) {}
@@ -255,13 +250,6 @@ public final class KeyActionEditScreen extends Screen {
         super.render(g, mouseX, mouseY, partialTick);
     }
 
-    @Override
-    public boolean isPauseScreen() {
-        return false;
-    }
-
-    @Override
-    public void onClose() {
-        this.minecraft.setScreen(parent);
-    }
+    @Override public boolean isPauseScreen() { return false; }
+    @Override public void onClose() { this.minecraft.setScreen(parent); }
 }

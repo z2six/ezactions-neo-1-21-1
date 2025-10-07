@@ -19,26 +19,42 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 
 /**
- * Editor for "run command" items.
- * - Command box is multi-line (configurable visible lines via general-client.toml), scrollable; one command per line.
- * - Optional "multi-command delay" (ticks) below the command box; blank => 0.
- * - Preserves typed title/command while opening child pickers
- * - Shows live icon preview
- * - Persists to current level on Save
+ * // MainFile: src/main/java/org/z2six/ezactions/gui/editor/CommandActionEditScreen.java
+ *
+ * Field rows:
+ *   Label
+ *   10 px
+ *   Field (or multiline)
+ *   5 px
+ *   (next Label)
+ *
+ * Buttons:
+ *   - First button row starts 10 px after the element above it.
+ *   - Each successive button row has 5 px vertical gap.
  */
 public final class CommandActionEditScreen extends Screen {
+
+    // Field spacing
+    private static final int LABEL_TO_FIELD = 10;         // label -> field
+    private static final int FIELD_TO_NEXT_LABEL = 5;     // field -> next label
+
+    // Button spacing
+    private static final int FIRST_BUTTON_ROW_OFFSET = 10; // after last field to first button row
+    private static final int BETWEEN_BUTTON_ROWS = 5;      // between successive button rows
 
     private final Screen parent;
     private final MenuItem editing; // null => add new
 
     // Draft state that survives pickers
     private String   draftTitle   = "";
+    private String   draftNote    = "";
     private String   draftCommand = "/say hi";
     private int      draftDelayTicks = 0;
     private IconSpec draftIcon    = IconSpec.item("minecraft:stone");
 
     // Widgets
     private EditBox titleBox;
+    private EditBox noteBox;
     private MultiLineEditBox cmdBox;
     private EditBox delayBox;
 
@@ -49,13 +65,11 @@ public final class CommandActionEditScreen extends Screen {
 
         if (editing != null && editing.action() instanceof ClickActionCommand cc) {
             this.draftTitle = safe(editing.title());
+            try { this.draftNote = safe(editing.note()); } catch (Throwable ignored) {}
 
-            // Prefer direct API; fallback to reflection for older builds
             String extracted = "";
             try { extracted = cc.getCommand(); } catch (Throwable ignored) {}
-            if (extracted == null || extracted.isEmpty()) {
-                extracted = tryExtractCommandString(cc);
-            }
+            if (extracted == null || extracted.isEmpty()) extracted = tryExtractCommandString(cc);
             if (!extracted.isEmpty()) this.draftCommand = extracted;
 
             int delay = 0;
@@ -69,9 +83,7 @@ public final class CommandActionEditScreen extends Screen {
 
     private static String safe(String s) { return s == null ? "" : s; }
 
-    /** Attempts to read the command string from a ClickActionCommand (legacy reflection fallback). */
     private static String tryExtractCommandString(ClickActionCommand cc) {
-        // 1) Methods
         String[] methodNames = { "command", "getCommand", "getCmd", "cmd" };
         for (String mname : methodNames) {
             try {
@@ -80,7 +92,6 @@ public final class CommandActionEditScreen extends Screen {
                 if (v instanceof String s && !s.isEmpty()) return s;
             } catch (Throwable ignored) {}
         }
-        // 2) Fields
         String[] fieldNames = { "command", "cmd", "commandRaw" };
         for (String fname : fieldNames) {
             try {
@@ -93,9 +104,7 @@ public final class CommandActionEditScreen extends Screen {
         return "";
     }
 
-    /** Attempts to read delay ticks via reflection for older builds. */
     private static int tryExtractDelayTicks(ClickActionCommand cc) {
-        // 1) Methods
         String[] methods = { "getDelayTicks", "delayTicks", "getDelay", "delay" };
         for (String mname : methods) {
             try {
@@ -104,7 +113,6 @@ public final class CommandActionEditScreen extends Screen {
                 if (v instanceof Number n) return n.intValue();
             } catch (Throwable ignored) {}
         }
-        // 2) Fields
         String[] fields = { "delayTicks", "delay", "ticksDelay" };
         for (String fname : fields) {
             try {
@@ -121,87 +129,89 @@ public final class CommandActionEditScreen extends Screen {
     protected void init() {
         int cx = this.width / 2;
 
-        // Title input
-        int titleY = 48;
-        titleBox = new EditBox(this.font, cx - 160, titleY, 320, 20, Component.literal("Title"));
+        // Title field
+        int y = 48;
+        titleBox = new EditBox(this.font, cx - 160, y, 320, 20, Component.literal("Title"));
         titleBox.setHint(Component.literal("Title (e.g., Say Time)"));
         titleBox.setValue(draftTitle);
         titleBox.setResponder(s -> draftTitle = safe(s));
         addRenderableWidget(titleBox);
+        y += 20 + FIELD_TO_NEXT_LABEL + LABEL_TO_FIELD;
 
-        // Read desired visible lines for command box from config (defensive)
+        // Note field
+        noteBox = new EditBox(this.font, cx - 160, y, 320, 20, Component.literal("Note"));
+        noteBox.setHint(Component.literal("Optional note (tooltip in editor)"));
+        noteBox.setValue(draftNote);
+        noteBox.setResponder(s -> draftNote = safe(s));
+        addRenderableWidget(noteBox);
+        y += 20 + FIELD_TO_NEXT_LABEL + LABEL_TO_FIELD;
+
+        // Command box
         int cfgLines = 5;
-        try {
-            cfgLines = GeneralClientConfig.CONFIG.commandEditorVisibleLines();
-        } catch (Throwable t) {
+        try { cfgLines = GeneralClientConfig.CONFIG.commandEditorVisibleLines(); }
+        catch (Throwable t) {
             Constants.LOG.debug("[{}] commandEditorVisibleLines read failed; using default 5: {}", Constants.MOD_NAME, t.toString());
             cfgLines = 5;
         }
-        // Hard clamp safety (should already be clamped in getter)
         if (cfgLines < 1) cfgLines = 1;
         if (cfgLines > 20) cfgLines = 20;
 
-        // Multi-line Command input (configurable visible lines), with internal scrollbar
-        final int V_PADDING = 6;       // small vertical padding inside the widget
-        final int LABEL_ABOVE = 14;    // space for label above the box
-        final int GAP_BELOW_TITLE = 8; // desired gap between Title box bottom and "Command:" label baseline
-
+        final int V_PADDING = 6;
         int cmdH = this.font.lineHeight * cfgLines + V_PADDING;
-        int cmdY = titleBox.getY() + titleBox.getHeight() + GAP_BELOW_TITLE + LABEL_ABOVE;
 
-        // 1.21.x ctor: (Font, x, y, w, h, message, initialText)
         cmdBox = new MultiLineEditBox(
                 this.font,
-                cx - 160, cmdY, 320, cmdH,
+                cx - 160, y, 320, cmdH,
                 Component.literal("Command"),
                 Component.literal(draftCommand)
         );
-        cmdBox.setCharacterLimit(32767);       // effectively "no limit"
-        cmdBox.setValue(draftCommand);         // ensure exact initial value
+        cmdBox.setCharacterLimit(32767);
+        cmdBox.setValue(draftCommand);
         cmdBox.setValueListener(s -> draftCommand = safe(s));
         addRenderableWidget(cmdBox);
+        y += cmdH + FIELD_TO_NEXT_LABEL + LABEL_TO_FIELD;
 
-        // Delay field directly below the command box (keep the same vertical rhythm)
-        int delayY = cmdY + cmdH + LABEL_ABOVE + GAP_BELOW_TITLE;
-
-        delayBox = new EditBox(this.font, cx - 160, delayY, 80, 20, Component.literal("Delay (ticks)"));
+        // Delay field
+        delayBox = new EditBox(this.font, cx - 160, y, 80, 20, Component.literal("Delay (ticks)"));
         delayBox.setValue(this.draftDelayTicks > 0 ? Integer.toString(this.draftDelayTicks) : "");
         delayBox.setResponder(s -> {
             try {
                 int v = Integer.parseInt(s.trim());
                 draftDelayTicks = Math.max(0, v);
-            } catch (Throwable ignored) {
-                // leave draftDelayTicks unchanged if user is midway typing
-            }
+            } catch (Throwable ignored) {}
         });
         addRenderableWidget(delayBox);
+        y += 20;
 
-        int y = delayY + 28; // push everything below accordingly
+        // --- Button rows stack ---
+        // First button row offset (10px after element above)
+        y += FIRST_BUTTON_ROW_OFFSET;
 
-        // Icon picker
+        // Row 1: icon picker
         addRenderableWidget(Button.builder(Component.literal("Choose Icon"), b -> {
             this.minecraft.setScreen(new IconPickerScreen(this, ic -> {
                 draftIcon = (ic == null) ? IconSpec.item("minecraft:stone") : ic;
                 this.minecraft.setScreen(this);
             }));
         }).bounds(cx - 160, y, 320, 20).build());
-        y += 28;
+        y += 20 + BETWEEN_BUTTON_ROWS;
 
-        // Save / Cancel / Back
+        // Row 2: Save / Cancel / Back
         addRenderableWidget(Button.builder(Component.literal("Save"), b -> onSavePressed())
                 .bounds(cx - 160, y, 100, 20).build());
         addRenderableWidget(Button.builder(Component.literal("Cancel"), b -> onClose())
                 .bounds(cx - 52, y, 100, 20).build());
         addRenderableWidget(Button.builder(Component.literal("Back"), b -> this.minecraft.setScreen(parent))
                 .bounds(cx + 56, y, 100, 20).build());
+        // --- end button stack ---
     }
 
     private void onSavePressed() {
         try {
             draftTitle   = safe(titleBox == null ? draftTitle : titleBox.getValue()).trim();
+            draftNote    = safe(noteBox  == null ? draftNote  : noteBox.getValue()).trim();
             draftCommand = safe(cmdBox   == null ? draftCommand : cmdBox.getValue()).trim();
 
-            // Parse delay; blank or invalid => 0
             int delay = 0;
             try {
                 String s = (delayBox == null) ? "" : delayBox.getValue().trim();
@@ -214,9 +224,11 @@ public final class CommandActionEditScreen extends Screen {
                 return;
             }
 
+            // Assumes MenuItem supports a 'note' field
             MenuItem item = new MenuItem(
                     editing != null ? editing.id() : MenuEditorScreen.freshId("cmd"),
                     draftTitle,
+                    draftNote,
                     draftIcon,
                     new ClickActionCommand(draftCommand, draftDelayTicks),
                     java.util.List.of()
@@ -247,22 +259,26 @@ public final class CommandActionEditScreen extends Screen {
 
         g.drawCenteredString(this.font, this.title.getString(), this.width / 2, 14, 0xFFFFFF);
 
-        // Labels drawn directly above their boxes
-        final int LABEL_ABOVE = 14;
-        int labelX = this.width / 2 - 160;
-        g.drawString(this.font, "Title:",   labelX, (titleBox != null ? titleBox.getY() : 48) - LABEL_ABOVE, 0xA0A0A0);
-        g.drawString(this.font, "Command:", labelX, (cmdBox   != null ? cmdBox.getY()   : 76) - LABEL_ABOVE, 0xA0A0A0);
-
-        // Delay label above delay box (aligned left with the command box)
+        // Labels above their boxes
+        final int labelX = this.width / 2 - 160;
+        if (titleBox != null) {
+            g.drawString(this.font, "Title:",   labelX, titleBox.getY() - LABEL_TO_FIELD, 0xA0A0A0);
+        }
+        if (noteBox != null) {
+            g.drawString(this.font, "Note:",    labelX, noteBox.getY() - LABEL_TO_FIELD, 0xA0A0A0);
+        }
+        if (cmdBox != null) {
+            g.drawString(this.font, "Command:", labelX, cmdBox.getY() - LABEL_TO_FIELD, 0xA0A0A0);
+        }
         if (delayBox != null) {
-            g.drawString(this.font, "Multi-command delay (ticks):", labelX, delayBox.getY() - LABEL_ABOVE, 0xA0A0A0);
+            g.drawString(this.font, "Multi-command delay (ticks):", labelX, delayBox.getY() - LABEL_TO_FIELD, 0xA0A0A0);
         }
 
-        // Icon preview box (top-right)
+        // Icon preview (top-right)
         int boxW = 60, boxH = 60;
         int bx = this.width - boxW - 16;
         int by = 16;
-        g.fill(bx - 1, by - 1, bx + boxW + 1, by + boxH + 1, 0x40FFFFFF); // border
+        g.fill(bx - 1, by - 1, bx + boxW + 1, by + boxH + 1, 0x40FFFFFF);
         g.fill(bx, by, bx + boxW, by + boxH, 0x20202020);
         g.drawString(this.font, "Icon", bx + 18, by + 4, 0xA0A0A0);
         try {
@@ -272,11 +288,6 @@ public final class CommandActionEditScreen extends Screen {
         super.render(g, mouseX, mouseY, partialTick);
     }
 
-    @Override
-    public boolean isPauseScreen() { return false; }
-
-    @Override
-    public void onClose() {
-        this.minecraft.setScreen(parent);
-    }
+    @Override public boolean isPauseScreen() { return false; }
+    @Override public void onClose() { this.minecraft.setScreen(parent); }
 }

@@ -36,6 +36,10 @@ import java.util.Objects;
  * - Drop over "Back to root"/"Back to XYZ": move OUT to that level WITHOUT changing the user's current view.
  * - Scrollbar & mouse wheel supported.
  * - Defensive logging; fail-soft behavior.
+ *
+ * Notes feature:
+ * - If an action has a non-empty note, we prefix a gold bookmark symbol before its title.
+ * - Hovering the bookmark shows the note as a tooltip. (The rest of the row behaves unchanged.)
  */
 public final class MenuEditorScreen extends Screen {
 
@@ -56,6 +60,10 @@ public final class MenuEditorScreen extends Screen {
     private static final int SB_BG = 0x40000000;
     private static final int SB_KNOB = 0x80FFFFFF;
     private static final int SB_KNOB_MINH = 20;
+
+    // Bookmark symbol (unicode). If the glyph isn't present, it will render as tofu but still occupy width.
+    private static final String BOOKMARK_SYM = "§6🔖§r"; // gold "bookmark" + reset
+    private static final int BOOKMARK_PAD_RIGHT = 4;     // padding between symbol and title
 
     // Construction
     private final Screen parent;
@@ -110,6 +118,10 @@ public final class MenuEditorScreen extends Screen {
     }
 
     // --- Helpers -------------------------------------------------------------
+
+    private static String safeNote(org.z2six.ezactions.data.menu.MenuItem mi) {
+        try { return mi == null ? null : mi.note(); } catch (Throwable ignored) { return null; }
+    }
 
     public static String freshId(String prefix) {
         long t = System.currentTimeMillis();
@@ -500,6 +512,9 @@ public final class MenuEditorScreen extends Screen {
 
         hoveredRow = hitList(mouseX, mouseY) ? mouseToRow(mouseY) : -1;
 
+        // Track if we already rendered a tooltip (avoid multiple tooltips per frame)
+        boolean tooltipRendered = false;
+
         for (int i = first; i <= last; i++) {
             int y = listTop + (i * ROW_H) - (int)scrollY;
             if (y + ROW_H < listTop || y > listTop + listHeight) continue;
@@ -517,35 +532,64 @@ public final class MenuEditorScreen extends Screen {
 
             if (isBreadcrumb) {
                 String txt = ((Rows.BreadcrumbRow) r).path();
-                g.drawString(this.font, txt, listLeft + 8, y + (ROW_H - 9) / 2, 0xFFFFFFFF);
+                g.drawString(this.font, txt, listLeft + 8, y + (ROW_H - this.font.lineHeight) / 2, 0xFFFFFFFF);
 
             } else if (isBackRoot) {
-                String txt = ChatFormatting.RED + "Back to root";
-                g.drawString(this.font, txt, listLeft + 8, y + (ROW_H - 9) / 2, 0xFF0000);
+                String txt = net.minecraft.ChatFormatting.RED + "Back to root";
+                g.drawString(this.font, txt, listLeft + 8, y + (ROW_H - this.font.lineHeight) / 2, 0xFF0000);
 
             } else if (isBackParent) {
                 String parent = ((Rows.BackToParentRow) r).parentName();
-                String txt = ChatFormatting.RED + "Back to " + parent;
-                g.drawString(this.font, txt, listLeft + 8, y + (ROW_H - 9) / 2, 0xFF0000);
+                String txt = net.minecraft.ChatFormatting.RED + "Back to " + parent;
+                g.drawString(this.font, txt, listLeft + 8, y + (ROW_H - this.font.lineHeight) / 2, 0xFF0000);
 
             } else {
+                // --- Normal item row (action or bundle) ---
                 MenuItem mi = ((Rows.ItemRow) r).item();
                 int textX = listLeft + 8;
 
+                // Icon
                 IconSpec icon = mi.icon();
                 if (icon != null) {
                     IconRenderer.drawIcon(g, listLeft + 8 + ICON_SZ / 2, y + ROW_H / 2, icon);
                     textX += ICON_SZ + 6;
                 }
 
+                // Bookmark marker (for ANY item that has a note)
+                int titleX = textX;
+                String note = safeNote(mi);
+                if (note != null && !note.isBlank()) {
+                    String sym = BOOKMARK_SYM;
+                    int symW = this.font.width(sym);
+                    int symX = titleX;
+                    int symY = y + (ROW_H - this.font.lineHeight) / 2;
+
+                    // Draw the marker with a soft tint
+                    g.drawString(this.font, sym, symX, symY, 0xFFFFAA);
+                    titleX += symW + BOOKMARK_PAD_RIGHT;
+
+                    // Tooltip when hovering the marker; only one tooltip per frame
+                    if (!tooltipRendered) {
+                        boolean over = (mouseX >= symX && mouseX <= symX + symW && mouseY >= y && mouseY <= y + ROW_H);
+                        if (over) {
+                            try {
+                                g.renderTooltip(this.font, net.minecraft.network.chat.Component.literal(note), mouseX, mouseY);
+                                tooltipRendered = true;
+                            } catch (Throwable ignored) {}
+                        }
+                    }
+                }
+
+                // Name (with RMB hint for categories)
                 String name = mi.title() == null ? "(untitled)" : mi.title();
                 if (mi.isCategory()) name = "§c(RMB to open)§r " + name;
-                g.drawString(this.font, name, textX, y + (ROW_H - 9) / 2, 0xFFFFFF);
+                g.drawString(this.font, name, titleX, y + (ROW_H - this.font.lineHeight) / 2, 0xFFFFFF);
 
-                IClickAction act = mi.action();
+                // Right-aligned type label (BUNDLE for categories)
+                org.z2six.ezactions.data.click.IClickAction act = mi.action();
                 String t = (act != null) ? act.getType().name() : "BUNDLE";
                 int tw = this.font.width(t);
-                g.drawString(this.font, t, listLeft + listWidth - tw - 8, y + (ROW_H - 9) / 2, 0xA0A0A0);
+                g.drawString(this.font, t, listLeft + listWidth - tw - 8, y + (ROW_H - this.font.lineHeight) / 2, 0xA0A0A0);
             }
         }
 
@@ -568,7 +612,7 @@ public final class MenuEditorScreen extends Screen {
                 }
                 String name = mi.title() == null ? "(untitled)" : mi.title();
                 if (mi.isCategory()) name = "§c(RMB to open)§r " + name;
-                g.drawString(this.font, name, ghostTextX, yGhost + (ROW_H - 9) / 2, 0xFFFFFF);
+                g.drawString(this.font, name, ghostTextX, yGhost + (ROW_H - this.font.lineHeight) / 2, 0xFFFFFF);
             }
 
             if (dropTargetCategory != null && dropTargetRowIdx >= 0) {
@@ -584,12 +628,12 @@ public final class MenuEditorScreen extends Screen {
         }
 
         // Scrollbar
-        ScrollbarMath.Metrics sb = ScrollbarMath.compute(
+        org.z2six.ezactions.gui.editor.menu.ScrollbarMath.Metrics sb = org.z2six.ezactions.gui.editor.menu.ScrollbarMath.compute(
                 listLeft, listTop, listWidth, listHeight,
                 SB_W, SB_KNOB_MINH,
                 rowCount(), ROW_H, scrollY
         );
-        ScrollbarMath.draw(g, sb, SB_BG, SB_KNOB);
+        org.z2six.ezactions.gui.editor.menu.ScrollbarMath.draw(g, sb, SB_BG, SB_KNOB);
 
         super.render(g, mouseX, mouseY, partialTick);
     }

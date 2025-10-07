@@ -1,275 +1,396 @@
 // MainFile: src/main/java/org/z2six/ezactions/gui/editor/config/ColorPickerScreen.java
 package org.z2six.ezactions.gui.editor.config;
 
-import net.minecraft.client.Minecraft;
+import com.mojang.blaze3d.systems.RenderSystem;
+import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
-import org.z2six.ezactions.Constants;
+import net.minecraft.util.Mth;
 
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * // MainFile: src/main/java/org/z2six/ezactions/gui/editor/config/ColorPickerScreen.java
- * Simple HSV + Alpha color picker:
- * - Left: Sat/Val square for current hue
- * - Right: vertical Hue slider
- * - Below: Alpha slider
- * - Hex input box + live preview
- *
- * Returns ARGB via onPick.accept(color) when "OK" is pressed.
+ * NeoForge/Minecraft 1.21.1 compatible color picker:
+ * - Hex field (#AARRGGBB / #RRGGBB)
+ * - Alpha percent field (0..100) + slider
+ * - Hue slider + SV square (simple gradient rendering)
+ * - OK/Cancel with callback so parent can persist
  */
-public final class ColorPickerScreen extends Screen {
+public class ColorPickerScreen extends Screen {
 
     private final Screen parent;
     private final Consumer<Integer> onPick;
 
-    // HSV + A draft
-    private float h;    // 0..1
-    private float s;    // 0..1
-    private float v;    // 0..1
-    private int   a;    // 0..255
+    // ARGB channels (0..255)
+    private int alpha, red, green, blue;
 
-    // Widgets
+    // HSV (0..1)
+    private float hue, sat, val;
+
+    // UI
     private EditBox hexBox;
+    private EditBox alphaBox;
+    private AlphaSlider alphaSlider;
 
-    // Geometry
-    private int pad = 12;
+    // layout
+    private int contentLeft;
+    private int contentTop;
+
+    // picker rects
     private int svX, svY, svW, svH;
     private int hueX, hueY, hueW, hueH;
-    private int aX, aY, aW, aH;
 
+    // internal guard to avoid responder loops
+    private boolean updatingUI = false;
+
+    // dragging
     private boolean draggingSV = false;
     private boolean draggingHue = false;
-    private boolean draggingA = false;
 
-    public ColorPickerScreen(Screen parent, int initialARGB, Consumer<Integer> onPick) {
+    public ColorPickerScreen(Screen parent, int initialArgb, Consumer<Integer> onPick) {
         super(Component.literal("Pick Color"));
         this.parent = parent;
         this.onPick = onPick;
 
-        int R = ColorUtil.r(initialARGB);
-        int G = ColorUtil.g(initialARGB);
-        int B = ColorUtil.b(initialARGB);
-        this.a = ColorUtil.a(initialARGB);
-        float[] hsv = ColorUtil.rgbToHsv(R, G, B);
-        this.h = hsv[0];
-        this.s = hsv[1];
-        this.v = hsv[2];
+        this.alpha = (initialArgb >>> 24) & 0xFF;
+        this.red   = (initialArgb >>> 16) & 0xFF;
+        this.green = (initialArgb >>> 8)  & 0xFF;
+        this.blue  = (initialArgb)        & 0xFF;
+
+        float[] hsv = ColorUtil.rgbToHsv(red, green, blue);
+        this.hue = hsv[0];
+        this.sat = hsv[1];
+        this.val = hsv[2];
     }
 
     @Override
     protected void init() {
-        int cx = this.width / 2;
+        super.init();
 
-        // Layout
-        svW = Math.min(220, Math.max(140, this.width - 2*pad - 60));
-        svH = svW; // square
-        svX = pad;
-        svY = pad + 20;
+        // content inset
+        int marginLeft = 20;
+        int marginTop  = 20;
+        this.contentLeft = marginLeft;
+        Font font = this.font;
+        int titleY = marginTop;
+        this.contentTop = titleY + font.lineHeight + 6;
 
-        hueW = 16;
-        hueH = svH;
-        hueX = svX + svW + 10;
-        hueY = svY;
+        // --- Controls layout ---
+        int fieldWidth = 140;
+        int fieldHeight = 20;
+        int y = contentTop;
 
-        aW = svW + hueW + 10;
-        aH = 12;
-        aX = svX;
-        aY = svY + svH + 12;
-
-        // Hex box + buttons
-        hexBox = new EditBox(this.font, svX, aY + aH + 10, aW - 180, 20, Component.literal("ARGB"));
-        hexBox.setValue(ColorUtil.toHexARGB(current()));
-        hexBox.setResponder(s -> {
-            int parsed = ColorUtil.parseHexARGB(s, current());
-            // Only replace draft if parse looks sane (keep A)
-            this.a = ColorUtil.a(parsed);
-            float[] hsv = ColorUtil.rgbToHsv(ColorUtil.r(parsed), ColorUtil.g(parsed), ColorUtil.b(parsed));
-            this.h = hsv[0]; this.s = hsv[1]; this.v = hsv[2];
-        });
-        addRenderableWidget(hexBox);
-
-        int btnY = hexBox.getY();
-        int btnX = hexBox.getX() + hexBox.getWidth() + 6;
-
-        addRenderableWidget(Button.builder(Component.literal("OK"), b -> {
+        // Hex box
+        this.hexBox = new EditBox(font, contentLeft, y, fieldWidth, fieldHeight, Component.literal("Hex"));
+        this.hexBox.setMaxLength(9); // including '#'
+        this.hexBox.setValue(ColorUtil.toHexARGB(alpha, red, green, blue));
+        this.hexBox.setResponder(text -> {
+            if (updatingUI) return;
             try {
-                if (onPick != null) onPick.accept(current());
-            } catch (Throwable t) {
-                Constants.LOG.warn("[{}] ColorPicker OK failed: {}", Constants.MOD_NAME, t.toString());
+                int[] argb = ColorUtil.parseHexARGB(text);
+                alpha = argb[0]; red = argb[1]; green = argb[2]; blue = argb[3];
+                float[] hsv = ColorUtil.rgbToHsv(red, green, blue);
+                hue = hsv[0]; sat = hsv[1]; val = hsv[2];
+                syncFromModel();
+            } catch (Exception ignored) {
+                // ignore while typing
             }
-            onClose();
-        }).bounds(btnX, btnY, 80, 20).build());
+        });
+        this.addRenderableWidget(this.hexBox);
 
-        addRenderableWidget(Button.builder(Component.literal("Cancel"), b -> onClose())
-                .bounds(btnX + 86, btnY, 80, 20).build());
+        // Alpha box (0..100)
+        y += fieldHeight + 6;
+        this.alphaBox = new EditBox(font, contentLeft, y, 60, fieldHeight, Component.literal("Alpha"));
+        this.alphaBox.setMaxLength(3);
+        this.alphaBox.setValue(Integer.toString(Math.round(alpha * 100f / 255f)));
+        this.alphaBox.setResponder(text -> {
+            if (updatingUI) return;
+            int pct = parseIntSafe(text, -1);
+            if (pct >= 0 && pct <= 100) {
+                alpha = Mth.clamp(Math.round(pct * 2.55f), 0, 255);
+                syncFromModel();
+            }
+        });
+        this.addRenderableWidget(this.alphaBox);
+
+        // Alpha slider (0..1)
+        int sliderX = contentLeft + 70;
+        this.alphaSlider = new AlphaSlider(sliderX, y, 120, fieldHeight,
+                (double) alpha / 255.0,
+                () -> {
+                    if (updatingUI) return;
+                    alpha = (int) Math.round(alphaSlider.getValue() * 255.0);
+                    syncFromModel();
+                });
+        this.addRenderableWidget(this.alphaSlider);
+
+        // SV square below
+        y += fieldHeight + 10;
+        this.svX = contentLeft;
+        this.svY = y;
+        this.svW = 190;
+        this.svH = 120;
+
+        // Hue vertical slider to the right of SV square
+        this.hueX = svX + svW + 8;
+        this.hueY = svY;
+        this.hueW = 14;
+        this.hueH = svH;
+
+        // OK / Cancel
+        int btnY = svY + svH + 12;
+        Button ok = Button.builder(Component.translatable("gui.ok"), btn -> {
+            int picked = ((alpha & 0xFF) << 24) | ((red & 0xFF) << 16) | ((green & 0xFF) << 8) | (blue & 0xFF);
+            if (onPick != null) onPick.accept(picked);
+            this.minecraft.setScreen(parent);
+        }).bounds(contentLeft, btnY, 80, 20).build();
+
+        Button cancel = Button.builder(Component.translatable("gui.cancel"), btn -> this.minecraft.setScreen(parent))
+                .bounds(contentLeft + 90, btnY, 80, 20).build();
+
+        this.addRenderableWidget(ok);
+        this.addRenderableWidget(cancel);
+
+        // Initial sync (ensures slider and boxes are coherent)
+        syncFromModel();
     }
 
-    private int current() {
-        int[] rgb = ColorUtil.hsvToRgb(h, s, v);
-        return ColorUtil.argb(a, rgb[0], rgb[1], rgb[2]);
-    }
+    // --- Rendering ---
 
     @Override
-    public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
-        g.fill(0, 0, width, height, 0xA0000000);
-        g.drawString(this.font, "Saturation / Value", svX, svY - 12, 0xA0A0A0);
-        g.drawString(this.font, "Hue", hueX, hueY - 12, 0xA0A0A0);
-        g.drawString(this.font, "Alpha", aX, aY - 12, 0xA0A0A0);
+    public void render(GuiGraphics gfx, int mouseX, int mouseY, float partialTick) {
+        this.renderBackground(gfx, mouseX, mouseY, partialTick);
 
-        // SV square (for current hue)
-        int[] hueRgb = ColorUtil.hsvToRgb(h, 1f, 1f);
-        // We render SV with simple gradients: X = S, Y = (1-V)
-        for (int y = 0; y < svH; y++) {
-            float vRow = 1f - (y / (float)(svH - 1));
-            for (int x = 0; x < svW; x++) {
-                float sCol = x / (float)(svW - 1);
-                int[] rgb = ColorUtil.hsvToRgb(h, sCol, vRow);
-                int col = ColorUtil.argb(255, rgb[0], rgb[1], rgb[2]);
-                g.fill(svX + x, svY + y, svX + x + 1, svY + y + 1, col);
+        // Title (drawn above everything, but our widgets are placed below due to contentTop)
+        gfx.drawString(this.font, this.title, contentLeft, contentTop - (this.font.lineHeight + 6), 0x808080, false);
+
+        // SV square
+        drawSVSquare(gfx, svX, svY, svW, svH);
+
+        // SV handle
+        int svHandleX = (int) (svX + (sat * (svW - 1)));
+        int svHandleY = (int) (svY + ((1f - val) * (svH - 1)));
+        gfx.fill(svHandleX - 2, svHandleY - 2, svHandleX + 3, svHandleY + 3, 0xFFFFFFFF);
+        gfx.fill(svHandleX - 1, svHandleY - 1, svHandleX + 2, svHandleY + 2, 0xFF000000);
+
+        // Hue bar
+        drawHueBar(gfx, hueX, hueY, hueW, hueH);
+
+        int hueYPos = (int) (hueY + (hue * (hueH - 1)));
+        gfx.fill(hueX - 1, hueYPos - 1, hueX + hueW + 1, hueYPos + 2, 0xFFFFFFFF);
+        gfx.fill(hueX, hueYPos, hueX + hueW, hueYPos + 1, 0xFF000000);
+
+        // Small preview swatch with checker
+        int previewX = hueX + hueW + 12;
+        int previewY = svY;
+        int previewW = 40;
+        int previewH = 20;
+        int argb = ((alpha & 0xFF) << 24) | ((red & 0xFF) << 16) | ((green & 0xFF) << 8) | (blue & 0xFF);
+        drawChecker(gfx, previewX, previewY, previewW, previewH, 4);
+        gfx.fill(previewX, previewY, previewX + previewW, previewY + previewH, argb);
+
+        // Right-side labels for fields
+        gfx.drawString(this.font, Component.literal("Hex"),
+                contentLeft + 140 + 8, contentTop + 4, 0xFFAAAAAA, false);
+        gfx.drawString(this.font, Component.literal("Alpha %"),
+                contentLeft + 70 + 120 + 8, contentTop + 4 + 26, 0xFFAAAAAA, false);
+
+        super.render(gfx, mouseX, mouseY, partialTick);
+    }
+
+    private void drawChecker(GuiGraphics gfx, int x, int y, int w, int h, int cell) {
+        int c1 = 0xFFB0B0B0;
+        int c2 = 0xFF8A8A8A;
+        for (int yy = y; yy < y + h; yy += cell) {
+            for (int xx = x; xx < x + w; xx += cell) {
+                boolean alt = (((xx - x) / cell) + ((yy - y) / cell)) % 2 == 0;
+                gfx.fill(xx, yy, Math.min(xx + cell, x + w), Math.min(yy + cell, y + h), alt ? c1 : c2);
             }
         }
+    }
 
-        // Hue bar (vertical rainbow)
-        for (int y = 0; y < hueH; y++) {
-            float hh = y / (float)(hueH - 1); // 0..1
+    private void drawSVSquare(GuiGraphics gfx, int x, int y, int w, int h) {
+        // Base: pure hue (sat=1, val=1)
+        int[] rgb = ColorUtil.hsvToRgb(hue, 1f, 1f);
+        int base = 0xFF000000 | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
+        gfx.fill(x, y, x + w, y + h, base);
+
+        RenderSystem.enableBlend();
+        // Overlay left->right white gradient (slice-based)
+        int steps = 16;
+        for (int i = 0; i < steps; i++) {
+            int x0 = x + (i * w) / steps;
+            int x1 = x + ((i + 1) * w) / steps;
+            float t = 1f - (i + 0.5f) / steps;
+            int a = (int) (t * 255f);
+            int col = (a << 24) | 0x00FFFFFF;
+            gfx.fill(x0, y, x1, y + h, col);
+        }
+        // Overlay top->bottom black gradient
+        gfx.fillGradient(x, y, x + w, y + h, 0x00000000, 0xFF000000);
+        RenderSystem.disableBlend();
+    }
+
+    private void drawHueBar(GuiGraphics gfx, int x, int y, int w, int h) {
+        int segH = h / 6;
+        int y0 = y;
+        fillHueSegment(gfx, x, y0, w, segH, 0f, 1f/6f); y0 += segH;
+        fillHueSegment(gfx, x, y0, w, segH, 1f/6f, 2f/6f); y0 += segH;
+        fillHueSegment(gfx, x, y0, w, segH, 2f/6f, 3f/6f); y0 += segH;
+        fillHueSegment(gfx, x, y0, w, segH, 3f/6f, 4f/6f); y0 += segH;
+        fillHueSegment(gfx, x, y0, w, segH, 4f/6f, 5f/6f); y0 += segH;
+        fillHueSegment(gfx, x, y0, w, h - 5*segH, 5f/6f, 1f);
+    }
+
+    private void fillHueSegment(GuiGraphics gfx, int x, int y, int w, int h, float h0, float h1) {
+        int steps = Math.max(8, h / 2);
+        for (int i = 0; i < steps; i++) {
+            float t = (i + 0.5f) / steps;
+            float hh = Mth.lerp(t, h0, h1);
             int[] rgb = ColorUtil.hsvToRgb(hh, 1f, 1f);
-            int col = ColorUtil.argb(255, rgb[0], rgb[1], rgb[2]);
-            g.fill(hueX, hueY + y, hueX + hueW, hueY + y + 1, col);
+            int col = 0xFF000000 | (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
+            int yy0 = y + (i * h) / steps;
+            int yy1 = y + ((i + 1) * h) / steps;
+            gfx.fill(x, yy0, x + w, yy1, col);
         }
-
-        // Alpha bar (checker + gradient)
-        // Checker background
-        int cell = 6;
-        for (int yy = 0; yy < aH; yy += cell) {
-            for (int xx = 0; xx < aW; xx += cell) {
-                int c = (((xx / cell) + (yy / cell)) % 2 == 0) ? 0xFFCCCCCC : 0xFFFFFFFF;
-                g.fill(aX + xx, aY + yy, aX + Math.min(xx + cell, aX + aW), aY + Math.min(yy + cell, aY + aH), c);
-            }
-        }
-        int[] rgb = ColorUtil.hsvToRgb(h, s, v);
-        for (int x = 0; x < aW; x++) {
-            float t = x / (float)(aW - 1);
-            int aa = Math.round(t * 255f);
-            int col = ColorUtil.argb(aa, rgb[0], rgb[1], rgb[2]);
-            g.fill(aX + x, aY, aX + x + 1, aY + aH, col);
-        }
-
-        // Cursors
-        int svCX = svX + Math.round(s * (svW - 1));
-        int svCY = svY + Math.round((1f - v) * (svH - 1));
-        drawCursor(g, svCX, svCY);
-
-        int hueCY = hueY + Math.round(h * (hueH - 1));
-        g.fill(hueX - 2, hueCY - 1, hueX + hueW + 2, hueCY + 2, 0xFF000000);
-        g.fill(hueX - 1, hueCY,     hueX + hueW + 1, hueCY + 1, 0xFFFFFFFF);
-
-        int aCX = aX + Math.round((a / 255f) * (aW - 1));
-        g.fill(aCX - 1, aY - 2, aCX + 2, aY + aH + 2, 0xFF000000);
-        g.fill(aCX,     aY - 1, aCX + 1, aY + aH + 1, 0xFFFFFFFF);
-
-        // Preview swatch + hex
-        int previewX = hexBox != null ? hexBox.getX() + hexBox.getWidth() + 6 : svX;
-        int previewY = hexBox != null ? hexBox.getY() - 24 : aY + aH + 10;
-        int sw = 60, sh = 18;
-        // checker bg
-        int px = previewX, py = previewY;
-        for (int yy = 0; yy < sh; yy += 6) {
-            for (int xx = 0; xx < sw; xx += 6) {
-                int c = (((xx / 6) + (yy / 6)) % 2 == 0) ? 0xFFCCCCCC : 0xFFFFFFFF;
-                g.fill(px + xx, py + yy, px + Math.min(xx + 6, sw), py + Math.min(yy + 6, sh), c);
-            }
-        }
-        g.fill(px, py, px + sw, py + sh, current());
-
-        if (hexBox != null) {
-            String hex = ColorUtil.toHexARGB(current());
-            g.drawString(this.font, hex, px + sw + 6, py + 4, 0xFFFFFF);
-        }
-
-        super.render(g, mouseX, mouseY, partialTick);
     }
 
-    private void drawCursor(GuiGraphics g, int x, int y) {
-        int s = 4;
-        g.fill(x - s, y, x + s + 1, y + 1, 0xFFFFFFFF);
-        g.fill(x, y - s, x + 1, y + s + 1, 0xFFFFFFFF);
-        g.fill(x - s, y - 1, x + s + 1, y, 0xFF000000);
-        g.fill(x - 1, y - s, x, y + s + 1, 0xFF000000);
-    }
+    // --- Mouse handling for SV and Hue ---
 
     @Override
-    public boolean mouseClicked(double mx, double my, int button) {
-        if (button != 0) return super.mouseClicked(mx, my, button);
-
-        if (mx >= svX && mx < svX + svW && my >= svY && my < svY + svH) {
-            updateSV(mx, my);
+    public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        if (inside(mouseX, mouseY, svX, svY, svW, svH)) {
             draggingSV = true;
-            syncHex();
+            updateSVFromMouse(mouseX, mouseY);
             return true;
         }
-        if (mx >= hueX && mx < hueX + hueW && my >= hueY && my < hueY + hueH) {
-            updateHue(my);
+        if (inside(mouseX, mouseY, hueX, hueY, hueW, hueH)) {
             draggingHue = true;
-            syncHex();
+            updateHueFromMouse(mouseY);
             return true;
         }
-        if (mx >= aX && mx < aX + aW && my >= aY && my < aY + aH) {
-            updateA(mx);
-            draggingA = true;
-            syncHex();
-            return true;
-        }
-        return super.mouseClicked(mx, my, button);
+        return super.mouseClicked(mouseX, mouseY, button);
     }
 
     @Override
-    public boolean mouseDragged(double mx, double my, int button, double dx, double dy) {
-        if (button != 0) return super.mouseDragged(mx, my, button, dx, dy);
-        if (draggingSV) { updateSV(mx, my); syncHex(); return true; }
-        if (draggingHue){ updateHue(my);    syncHex(); return true; }
-        if (draggingA)  { updateA(mx);      syncHex(); return true; }
-        return super.mouseDragged(mx, my, button, dx, dy);
+    public boolean mouseDragged(double mouseX, double mouseY, int button, double dx, double dy) {
+        if (draggingSV) {
+            updateSVFromMouse(mouseX, mouseY);
+            return true;
+        }
+        if (draggingHue) {
+            updateHueFromMouse(mouseY);
+            return true;
+        }
+        return super.mouseDragged(mouseX, mouseY, button, dx, dy);
     }
 
     @Override
-    public boolean mouseReleased(double mx, double my, int button) {
-        if (button == 0) {
-            draggingSV = draggingHue = draggingA = false;
-            return true;
+    public boolean mouseReleased(double mouseX, double mouseY, int button) {
+        draggingSV = false;
+        draggingHue = false;
+        return super.mouseReleased(mouseX, mouseY, button);
+    }
+
+    private boolean inside(double mx, double my, int x, int y, int w, int h) {
+        return mx >= x && mx < x + w && my >= y && my < y + h;
+    }
+
+    private void updateSVFromMouse(double mx, double my) {
+        float sx = (float) ((mx - svX) / (double) (svW - 1));
+        float vy = (float) ((my - svY) / (double) (svH - 1));
+        sat = ColorUtil.clamp01(sx);
+        val = ColorUtil.clamp01(1f - vy);
+        int[] rgb = ColorUtil.hsvToRgb(hue, sat, val);
+        red = rgb[0]; green = rgb[1]; blue = rgb[2];
+        syncFromModel();
+    }
+
+    private void updateHueFromMouse(double my) {
+        float ty = (float) ((my - hueY) / (double) (hueH - 1));
+        hue = ColorUtil.wrap01(ty);
+        int[] rgb = ColorUtil.hsvToRgb(hue, sat, val);
+        red = rgb[0]; green = rgb[1]; blue = rgb[2];
+        syncFromModel();
+    }
+
+    // --- Sync helpers (guarded to prevent responder loops) ---
+
+    private void syncFromModel() {
+        updatingUI = true;
+        try {
+            float[] hsv = ColorUtil.rgbToHsv(red, green, blue);
+            hue = hsv[0]; sat = hsv[1]; val = hsv[2];
+
+            // hex field
+            setBoxSilently(hexBox, ColorUtil.toHexARGB(alpha, red, green, blue));
+
+            // alpha percent box + slider
+            int pct = Math.round(alpha * 100f / 255f);
+            setBoxSilently(alphaBox, Integer.toString(pct));
+            alphaSlider.setFromOutside(alpha / 255.0);
+        } finally {
+            updatingUI = false;
         }
-        return super.mouseReleased(mx, my, button);
     }
 
-    private void updateSV(double mx, double my) {
-        float nx = (float)((mx - svX) / (double)(svW - 1));
-        float ny = (float)((my - svY) / (double)(svH - 1));
-        this.s = ColorUtil.clamp01(nx);
-        this.v = ColorUtil.clamp01(1f - ny);
+    private void setBoxSilently(EditBox box, String value) {
+        if (!Objects.equals(box.getValue(), value)) {
+            box.setValue(value); // will fire responder, but we are under updatingUI
+        }
     }
 
-    private void updateHue(double my) {
-        float ny = (float)((my - hueY) / (double)(hueH - 1));
-        this.h = Math.max(0f, Math.min(1f, ny));
+    private int parseIntSafe(String text, int def) {
+        try {
+            return Integer.parseInt(text.trim());
+        } catch (Exception e) {
+            return def;
+        }
     }
 
-    private void updateA(double mx) {
-        float nx = (float)((mx - aX) / (double)(aW - 1));
-        this.a = Math.max(0, Math.min(255, Math.round(nx * 255f)));
-    }
+    // --- Slider ---
 
-    private void syncHex() {
-        if (hexBox != null) hexBox.setValue(ColorUtil.toHexARGB(current()));
+    private static class AlphaSlider extends AbstractSliderButton {
+        private final Runnable onChanged;
+
+        AlphaSlider(int x, int y, int w, int h, double initial, Runnable onChanged) {
+            super(x, y, w, h, Component.empty(), Mth.clamp(initial, 0.0, 1.0));
+            this.onChanged = onChanged;
+            updateMessage();
+        }
+
+        @Override
+        protected void updateMessage() {
+            int pct = (int) Math.round(this.value * 100.0);
+            this.setMessage(Component.literal("Alpha: " + pct + "%"));
+        }
+
+        @Override
+        protected void applyValue() {
+            if (onChanged != null) onChanged.run();
+        }
+
+        /** Programmatic setter that also refreshes label without causing external loops. */
+        void setFromOutside(double v) {
+            double nv = Mth.clamp(v, 0.0, 1.0);
+            if (Math.abs(nv - this.value) < 1e-6) return;
+            this.value = nv;
+            updateMessage();
+        }
+
+        /** Exposes the protected slider value to the outer screen. */
+        double getValue() {
+            return this.value;
+        }
     }
 
     @Override
     public void onClose() {
-        Minecraft.getInstance().setScreen(parent);
+        this.minecraft.setScreen(parent);
     }
-
-    @Override
-    public boolean isPauseScreen() { return false; }
 }

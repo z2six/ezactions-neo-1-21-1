@@ -16,12 +16,11 @@ import org.z2six.ezactions.config.RadialAnimConfig;
 import static java.lang.Integer.parseInt;
 
 /**
- * // MainFile: src/main/java/org/z2six/ezactions/gui/editor/config/ConfigScreen.java
  * In-game config UI (General / Animations / Design) with live previews + color pickers.
  * Saves directly into existing ModConfigSpec values (no crashes; defensive parsing).
  *
- * Labels for all EditBoxes are rendered to the RIGHT of each text box
- * so they never sit under the left category panel.
+ * Changes here implement the right-panel inner margin and ensure the section title
+ * sits above all fields (no overlap). Labels render to the RIGHT of each text box.
  */
 public final class ConfigScreen extends Screen {
 
@@ -30,6 +29,9 @@ public final class ConfigScreen extends Screen {
     // Section toggle
     private enum Section { GENERAL, ANIM, DESIGN }
     private Section section = Section.GENERAL;
+
+    // One-shot flag: when returning from a child screen (e.g., color picker), skip reloading drafts from spec
+    private boolean skipReloadDraftsOnce = false;
 
     // --- Drafts (read from current specs on init) ----------------------------
     // General
@@ -75,7 +77,11 @@ public final class ConfigScreen extends Screen {
 
     @Override
     protected void init() {
-        readCurrentIntoDrafts();
+        if (!skipReloadDraftsOnce) {
+            readCurrentIntoDrafts();
+        } else {
+            skipReloadDraftsOnce = false; // consume the one-shot skip
+        }
         buildUI();
     }
 
@@ -113,6 +119,11 @@ public final class ConfigScreen extends Screen {
         final int FIELD_W = 160;
         final int FIELD_H = 20;
 
+        // Right panel inner margins & header spacing (implements the margin suggestion)
+        final int RIGHT_INNER_PAD = 16;   // left inset inside right panel
+        final int HEADER_Y = PAD + 8;     // header baseline inside right panel
+        final int FORM_TOP_GAP = 18;      // gap below header before fields begin
+
         // Left section chooser
         int x = PAD, y = PAD;
         addRenderableWidget(Button.builder(Component.literal("General"), b -> {
@@ -127,79 +138,83 @@ public final class ConfigScreen extends Screen {
             section = Section.DESIGN; buildUI();
         }).bounds(x, y, LEFT_W, 20).build());
 
-        // Bottom buttons (Save / Back) — stick to bottom, above each other
+        // Bottom buttons (Save / Back) — anchored to bottom of left panel
         int bottom = this.height - PAD;
         addRenderableWidget(Button.builder(Component.literal("Save"), b -> onSave())
                 .bounds(x, bottom - 22, LEFT_W, 20).build());
         addRenderableWidget(Button.builder(Component.literal("Back"), b -> onClose())
                 .bounds(x, bottom - 22 - 24, LEFT_W, 20).build());
 
-        // Right panel form
-        int formX = PAD + LEFT_W + PAD;
-        int formY = PAD + 8;
+        // Right panel form origin (panel bg drawn in render())
+        int rightPanelX = PAD + LEFT_W + PAD;
+        int formX = rightPanelX + RIGHT_INNER_PAD;          // inner left margin
+        int formY = HEADER_Y + FORM_TOP_GAP;                // fields start below header
+        int row = 0;
 
         switch (section) {
             case GENERAL -> {
-                int row = 0;
                 wMoveWhileOpen = addRenderableWidget(
                         CycleButton.onOffBuilder(draftMoveWhileRadialOpen)
                                 .create(formX, formY + row * 28, FIELD_W, FIELD_H, Component.literal("Move While Radial Open"))
-                ); row++;
+                );
+                row++;
 
                 wCmdLines = new EditBox(this.font, formX, formY + row * 28, FIELD_W, FIELD_H, Component.literal(""));
                 wCmdLines.setValue(Integer.toString(draftCmdVisibleLines));
-                addRenderableWidget(wCmdLines); row++;
+                addRenderableWidget(wCmdLines);
             }
 
             case ANIM -> {
-                int row = 0;
                 wAnimEnabled = addRenderableWidget(
                         CycleButton.onOffBuilder(draftAnimEnabled)
                                 .create(formX, formY + row * 28, FIELD_W, FIELD_H, Component.literal("Animations Enabled"))
-                ); row++;
+                );
+                row++;
 
                 wAnimOpenClose = addRenderableWidget(
                         CycleButton.onOffBuilder(draftAnimOpenClose)
                                 .create(formX, formY + row * 28, FIELD_W, FIELD_H, Component.literal("Open/Close Wipe"))
-                ); row++;
+                );
+                row++;
 
                 wAnimHover = addRenderableWidget(
                         CycleButton.onOffBuilder(draftAnimHover)
                                 .create(formX, formY + row * 28, FIELD_W, FIELD_H, Component.literal("Hover Animation"))
-                ); row++;
+                );
+                row++;
 
                 wHoverGrowPct = new EditBox(this.font, formX, formY + row * 28, FIELD_W, FIELD_H, Component.literal(""));
                 wHoverGrowPct.setValue(Double.toString(draftHoverGrowPct));
-                addRenderableWidget(wHoverGrowPct); row++;
+                addRenderableWidget(wHoverGrowPct);
+                row++;
 
                 wOpenCloseMs = new EditBox(this.font, formX, formY + row * 28, FIELD_W, FIELD_H, Component.literal(""));
                 wOpenCloseMs.setValue(Integer.toString(draftOpenCloseMs));
-                addRenderableWidget(wOpenCloseMs); row++;
+                addRenderableWidget(wOpenCloseMs);
             }
 
             case DESIGN -> {
-                int row = 0;
                 wDeadzone = addIntBox(formX, formY + row * 28, FIELD_W, FIELD_H, draftDeadzone); row++;
                 wOuter    = addIntBox(formX, formY + row * 28, FIELD_W, FIELD_H, draftBaseOuterRadius); row++;
                 wThick    = addIntBox(formX, formY + row * 28, FIELD_W, FIELD_H, draftRingThickness); row++;
                 wScaleStart = addIntBox(formX, formY + row * 28, FIELD_W, FIELD_H, draftScaleStartThreshold); row++;
                 wScalePer   = addIntBox(formX, formY + row * 28, FIELD_W, FIELD_H, draftScalePerItem); row++;
 
-                // Color pickers
                 int btnY = formY + row * 28;
                 wRingPick = Button.builder(Component.literal("Pick Ring Color…"), b -> {
+                    // Avoid re-reading spec on return so chosen color remains visible
+                    this.skipReloadDraftsOnce = true;
                     this.minecraft.setScreen(new ColorPickerScreen(this, draftRingColor, argb -> {
-                        draftRingColor = argb;
-                        this.minecraft.setScreen(this);
+                        draftRingColor = argb; // draft only; click Save to persist
                     }));
                 }).bounds(formX, btnY, FIELD_W, FIELD_H).build();
                 addRenderableWidget(wRingPick);
                 row++;
 
                 wHoverPick = Button.builder(Component.literal("Pick Hover Color…"), b -> {
+                    this.skipReloadDraftsOnce = true;
                     this.minecraft.setScreen(new ColorPickerScreen(this, draftHoverColor, argb -> {
-                        draftHoverColor = argb;
-                        this.minecraft.setScreen(this);
+                        draftHoverColor = argb; // draft only; click Save to persist
                     }));
                 }).bounds(formX, formY + row * 28, FIELD_W, FIELD_H).build();
                 addRenderableWidget(wHoverPick);
@@ -254,8 +269,7 @@ public final class ConfigScreen extends Screen {
                 }
             }
 
-            // Rebuild the visible page so previews/values reflect any clamping.
-            buildUI();
+            buildUI(); // reflect clamps
             Constants.LOG.info("[{}] Config saved (section: {})", Constants.MOD_NAME, section.name());
         } catch (Throwable t) {
             Constants.LOG.warn("[{}] Config save failed: {}", Constants.MOD_NAME, t.toString());
@@ -266,31 +280,33 @@ public final class ConfigScreen extends Screen {
     public void render(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
         final int PAD = 12;
         final int LEFT_W = 160;
+        final int RIGHT_INNER_PAD = 16;
         final int LABEL_COLOR = 0xA0A0A0;
 
+        // Backgrounds
         g.fill(0, 0, width, height, 0x88000000);
-
-        // Left panel bg
+        // Left panel
         g.fill(PAD, PAD, PAD + LEFT_W, this.height - PAD, 0xC0101010);
+        // Right panel
+        int rightPanelX = PAD + LEFT_W + PAD;
+        g.fill(rightPanelX, PAD, this.width - PAD, this.height - PAD, 0xC0101010);
 
-        // Right panel bg
-        int rightX1 = PAD + LEFT_W + PAD;
-        g.fill(rightX1, PAD, this.width - PAD, this.height - PAD, 0xC0101010);
-
+        // Title & section header
         g.drawCenteredString(this.font, this.title.getString(), this.width / 2, 8, 0xFFFFFF);
 
-        // Section header on the right
         String sec = switch (section) {
             case GENERAL -> "General";
             case ANIM    -> "Animations";
             case DESIGN  -> "Design";
         };
-        g.drawString(this.font, sec, rightX1, 28, LABEL_COLOR);
+        int headerX = rightPanelX + RIGHT_INNER_PAD;  // left margin INSIDE the right panel
+        int headerY = PAD + 8;                        // header baseline
+        g.drawString(this.font, sec, headerX, headerY, LABEL_COLOR);
 
         // Draw labels to the RIGHT of each EditBox (per section)
         switch (section) {
             case GENERAL -> {
-                drawRightLabel(g, wCmdLines, "Visible lines (1..20)");
+                drawRightLabel(g, wCmdLines, "Visible lines (1–20)");
             }
             case ANIM -> {
                 drawRightLabel(g, wHoverGrowPct, "Hover Grow % (0.0–0.5)");
@@ -303,19 +319,19 @@ public final class ConfigScreen extends Screen {
                 drawRightLabel(g, wScaleStart,  "Scale Start");
                 drawRightLabel(g, wScalePer,    "Scale / Item");
 
-                // Color previews on DESIGN section
-                // Keep them where they were (to the right of the color buttons).
-                int formX = PAD + LEFT_W + PAD;
-                int baseY = 28 + 8;
-                int rowsBeforeColors = 5;
-                int yRing  = baseY + rowsBeforeColors * 28;
-                int yHover = yRing + 28;
-
-                drawColorPreview(g, formX + 170 + 8, yRing,  draftRingColor);
-                drawColorPreview(g, formX + 170 + 8, yHover, draftHoverColor);
-
-                g.drawString(this.font, ColorUtil.toHexARGB(draftRingColor),  formX + 170 + 8 + 64 + 6, yRing  + 4, 0xFFFFFF);
-                g.drawString(this.font, ColorUtil.toHexARGB(draftHoverColor), formX + 170 + 8 + 64 + 6, yHover + 4, 0xFFFFFF);
+                // Color previews to the right of buttons
+                if (wRingPick != null) {
+                    int x = wRingPick.getX() + wRingPick.getWidth() + 8;
+                    int y = wRingPick.getY();
+                    drawColorPreview(g, x, y, draftRingColor);
+                    g.drawString(this.font, ColorUtil.toHexARGB(draftRingColor), x + 64 + 6, y + 4, 0xFFFFFF);
+                }
+                if (wHoverPick != null) {
+                    int x = wHoverPick.getX() + wHoverPick.getWidth() + 8;
+                    int y = wHoverPick.getY();
+                    drawColorPreview(g, x, y, draftHoverColor);
+                    g.drawString(this.font, ColorUtil.toHexARGB(draftHoverColor), x + 64 + 6, y + 4, 0xFFFFFF);
+                }
             }
         }
 
@@ -327,7 +343,7 @@ public final class ConfigScreen extends Screen {
         if (eb == null) return;
         final int GAP = 8;
         int lx = eb.getX() + eb.getWidth() + GAP;
-        int ly = eb.getY() + 4; // align nicely with field text
+        int ly = eb.getY() + 4; // align with field text
         g.drawString(this.font, label, lx, ly, 0xA0A0A0);
     }
 
