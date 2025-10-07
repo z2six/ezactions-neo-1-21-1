@@ -60,6 +60,31 @@ public final class RadialMenu {
         PATH.addLast(cat);
     }
 
+    /**
+     * Returns the mutable list for the parent level of the current page.
+     * - When depth == 0 (at root), returns null (no parent).
+     * - When depth == 1, returns ROOT.
+     * - When depth >= 2, returns childrenMutable() of the second-last category in PATH.
+     */
+    public static List<MenuItem> parentItems() {
+        ensureLoaded();
+        if (PATH.isEmpty()) return null; // at root: no parent
+
+        // Walk root -> ... -> current, while remembering the list at the previous depth.
+        List<MenuItem> items = ROOT;
+        Iterator<MenuItem> it = PATH.iterator();
+        while (it.hasNext()) {
+            MenuItem cat = it.next();
+            if (!it.hasNext()) {
+                // 'cat' is the deepest category (current page belongs to cat.children)
+                // The parent list is the list that contains 'cat' (i.e., 'items')
+                return items;
+            }
+            items = cat.childrenMutable();
+        }
+        return null; // defensive
+    }
+
     public static boolean canGoBack() { return !PATH.isEmpty(); }
 
     public static void goBack() {
