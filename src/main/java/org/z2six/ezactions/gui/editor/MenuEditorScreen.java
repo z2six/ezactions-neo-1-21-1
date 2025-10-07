@@ -349,11 +349,12 @@ public final class MenuEditorScreen extends Screen {
                 .bounds(xLeftCol, yRowBottom, HALF_W, BTN_H).build();
         addRenderableWidget(btnClose);
 
+        // Inside MenuEditorScreen.init() where btnConfig is created
         btnConfig = Button.builder(Component.literal("Config"), b -> {
             try {
-                Constants.LOG.info("[{}] Config button clicked (placeholder)", Constants.MOD_NAME);
+                this.minecraft.setScreen(new org.z2six.ezactions.gui.editor.config.ConfigScreen(this));
             } catch (Throwable t) {
-                Constants.LOG.warn("[{}] Config button handler failed: {}", Constants.MOD_NAME, t.toString());
+                org.z2six.ezactions.Constants.LOG.warn("[{}] Config button handler failed: {}", org.z2six.ezactions.Constants.MOD_NAME, t.toString());
             }
         }).bounds(xRightCol, yRowBottom, HALF_W, BTN_H).build();
         addRenderableWidget(btnConfig);
